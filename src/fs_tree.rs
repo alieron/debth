@@ -317,6 +317,8 @@ mod tests {
         fs::create_dir_all(&skip)?;
         fs::write(keep.join("main.rs"), "fn keep() {}\n")?;
         fs::write(skip.join("main.rs"), "fn skip() {}\n")?;
+        let keep = keep.canonicalize()?;
+        let skip = skip.canonicalize()?;
 
         let mut tree = FileTree::new(root.clone())?;
         while tree
