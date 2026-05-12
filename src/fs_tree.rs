@@ -262,6 +262,8 @@ mod tests {
     #[test]
     fn selected_directory_can_expand_and_collapse() -> Result<()> {
         let root = unique_temp_dir();
+        fs::create_dir_all(&root)?;
+        let root = root.canonicalize()?;
         let src = root.join("src");
         fs::create_dir_all(&src)?;
         fs::write(src.join("main.rs"), "fn main() {}\n")?;
@@ -288,6 +290,7 @@ mod tests {
     fn ignored_selected_file_disappears_from_visible_tree() -> Result<()> {
         let root = unique_temp_dir();
         fs::create_dir_all(&root)?;
+        let root = root.canonicalize()?;
         fs::write(root.join("keep.rs"), "fn keep() {}\n")?;
         fs::write(root.join("skip.rs"), "fn skip() {}\n")?;
 
@@ -311,6 +314,8 @@ mod tests {
     #[test]
     fn ignored_selected_directory_hides_children_from_stats_files() -> Result<()> {
         let root = unique_temp_dir();
+        fs::create_dir_all(&root)?;
+        let root = root.canonicalize()?;
         let keep = root.join("keep");
         let skip = root.join("skip");
         fs::create_dir_all(&keep)?;
