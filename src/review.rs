@@ -65,7 +65,19 @@ struct PersistedFileReview {
     #[serde(default)]
     lines: Vec<String>,
     #[serde(default)]
+    state_codes: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     states: Vec<LineState>,
+}
+
+impl PersistedFileReview {
+    fn states(&self) -> Vec<LineState> {
+        if !self.state_codes.is_empty() {
+            decode_state_codes(&self.state_codes)
+        } else {
+            self.states.clone()
+        }
+    }
 }
 
 impl ReviewStore {
@@ -104,7 +116,7 @@ impl ReviewStore {
         let content = read_text_lossy(path)?;
         let current_lines = split_lines(&content);
         let persisted = self.load_persisted(&relative)?;
-        let states = reconcile_states(&persisted.lines, &persisted.states, &current_lines);
+        let states = reconcile_states(&persisted.lines, &persisted.states(), &current_lines);
         let review = FileReview {
             lines: current_lines,
             states,
@@ -199,7 +211,8 @@ impl ReviewStore {
         if let Some(review) = self.cache.get(relative) {
             let persisted = PersistedFileReview {
                 lines: review.lines.clone(),
-                states: review.states.clone(),
+                state_codes: encode_state_codes(&review.states),
+                states: Vec::new(),
             };
             write_json(&self.review_path(relative), &persisted)?;
         }
@@ -306,6 +319,32 @@ fn stats_for_states(states: &[LineState]) -> ReviewStats {
     stats
 }
 
+fn encode_state_codes(states: &[LineState]) -> String {
+    states.iter().map(|state| state.code()).collect()
+}
+
+fn decode_state_codes(codes: &str) -> Vec<LineState> {
+    codes.chars().map(LineState::from_code).collect()
+}
+
+impl LineState {
+    fn code(self) -> char {
+        match self {
+            Self::Unreviewed => 'u',
+            Self::Accepted => 'a',
+            Self::Rejected => 'r',
+        }
+    }
+
+    fn from_code(code: char) -> Self {
+        match code {
+            'a' | 'A' => Self::Accepted,
+            'r' | 'R' => Self::Rejected,
+            _ => Self::Unreviewed,
+        }
+    }
+}
+
 fn gitignore_contains_debth(path: &Path) -> bool {
     fs::read_to_string(path).is_ok_and(|content| {
         content.lines().any(|line| {
@@ -367,6 +406,46 @@ mod tests {
         assert_eq!(
             reconcile_states(&previous, &previous_states, &current),
             vec![LineState::Unreviewed]
+        );
+    }
+
+    #[test]
+    fn state_codes_round_trip_compactly() {
+        let states = vec![
+            LineState::Unreviewed,
+            LineState::Accepted,
+            LineState::Rejected,
+        ];
+
+        assert_eq!(encode_state_codes(&states), "uar");
+        assert_eq!(decode_state_codes("uar"), states);
+    }
+
+    #[test]
+    fn persisted_review_supports_legacy_state_array() {
+        let persisted = PersistedFileReview {
+            lines: Vec::new(),
+            state_codes: String::new(),
+            states: vec![LineState::Accepted, LineState::Rejected],
+        };
+
+        assert_eq!(
+            persisted.states(),
+            vec![LineState::Accepted, LineState::Rejected]
+        );
+    }
+
+    #[test]
+    fn persisted_review_prefers_compact_state_codes() {
+        let persisted = PersistedFileReview {
+            lines: Vec::new(),
+            state_codes: "ra".to_string(),
+            states: vec![LineState::Accepted, LineState::Accepted],
+        };
+
+        assert_eq!(
+            persisted.states(),
+            vec![LineState::Rejected, LineState::Accepted]
         );
     }
 
