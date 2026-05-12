@@ -19,5 +19,8 @@ On first start in a git repo, `debth` creates `.debth/` for review state and ask
 - `Left`/`Right`: collapse or expand directories in the explorer
 - `a`: accept the selected file in the explorer or current line in the viewer
 - `r`: reject the selected file in the explorer or current line in the viewer
+- `i`: ignore the selected file or directory in the explorer
 - `u`: mark the current line unreviewed
 - `q`: quit
+
+Ignored paths are stored in `.debth/ignore` using a readable `.gitignore`-style format. Edit that file to remove or change ignored paths.

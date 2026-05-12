@@ -1,5 +1,6 @@
 mod app;
 mod fs_tree;
+mod ignore;
 mod review;
 
 use std::{io, panic};

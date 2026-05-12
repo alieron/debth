@@ -129,6 +129,9 @@ impl App {
             KeyCode::Char('r') if self.active_pane == Pane::Files => {
                 self.mark_selected_file(LineState::Rejected)?;
             }
+            KeyCode::Char('i') if self.active_pane == Pane::Files => {
+                self.ignore_selected_entry()?;
+            }
             KeyCode::Char('a') if self.active_pane == Pane::Viewer => {
                 self.mark_current_line(LineState::Accepted)?;
             }
@@ -267,6 +270,29 @@ impl App {
     fn selected_file_path(&self) -> Option<PathBuf> {
         let entry = self.tree.selected_entry()?;
         (entry.kind == TreeEntryKind::File).then(|| entry.path.clone())
+    }
+
+    fn ignore_selected_entry(&mut self) -> Result<()> {
+        let Some(ignored) = self.tree.ignore_selected()? else {
+            self.status = "Select a file or directory before ignoring it".to_string();
+            return Ok(());
+        };
+
+        if let Some(current_file) = &self.current_file
+            && path_covers(
+                &ignored.path,
+                current_file,
+                ignored.kind == TreeEntryKind::Directory,
+            )
+        {
+            self.current_file = None;
+            self.current_review = None;
+            self.current_line = 0;
+            self.scroll = 0;
+        }
+
+        self.status = format!("Ignored {} in .debth/ignore", ignored.pattern);
+        self.refresh_stats()
     }
 
     fn refresh_stats(&mut self) -> Result<()> {
@@ -701,6 +727,7 @@ fn shortcut_line(pane: Pane) -> Line<'static> {
             ("space", "toggle"),
             ("a", "accept file"),
             ("r", "reject file"),
+            ("i", "ignore"),
             ("<-/->", "tree"),
         ],
         Pane::Viewer => vec![
@@ -799,6 +826,14 @@ fn display_path(root: &Path, path: &Path) -> String {
         .unwrap_or(path)
         .to_string_lossy()
         .to_string()
+}
+
+fn path_covers(base: &Path, path: &Path, base_is_dir: bool) -> bool {
+    if base_is_dir {
+        path.starts_with(base)
+    } else {
+        path == base
+    }
 }
 
 #[cfg(test)]

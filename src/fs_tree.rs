@@ -7,6 +7,8 @@ use std::{
 
 use anyhow::{Context, Result};
 
+use crate::ignore::IgnoreRules;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TreeEntryKind {
     Directory,
@@ -25,9 +27,17 @@ pub struct VisibleEntry {
 #[derive(Clone, Debug)]
 pub struct FileTree {
     root: PathBuf,
+    ignore_rules: IgnoreRules,
     expanded: BTreeSet<PathBuf>,
     visible: Vec<VisibleEntry>,
     selected: usize,
+}
+
+#[derive(Clone, Debug)]
+pub struct IgnoredEntry {
+    pub path: PathBuf,
+    pub kind: TreeEntryKind,
+    pub pattern: String,
 }
 
 impl FileTree {
@@ -35,10 +45,12 @@ impl FileTree {
         let root = root
             .canonicalize()
             .with_context(|| format!("failed to resolve {}", root.display()))?;
+        let ignore_rules = IgnoreRules::load(&root)?;
         let mut expanded = BTreeSet::new();
         expanded.insert(root.clone());
         let mut tree = Self {
             root,
+            ignore_rules,
             expanded,
             visible: Vec::new(),
             selected: 0,
@@ -49,6 +61,7 @@ impl FileTree {
 
     pub fn refresh(&mut self) -> Result<()> {
         let previous = self.selected_path().map(Path::to_path_buf);
+        self.ignore_rules = IgnoreRules::load(&self.root)?;
         self.visible.clear();
         self.push_children(self.root.clone(), 0)?;
 
@@ -147,9 +160,24 @@ impl FileTree {
         Ok(())
     }
 
+    pub fn ignore_selected(&mut self) -> Result<Option<IgnoredEntry>> {
+        let Some(entry) = self.selected_entry().cloned() else {
+            return Ok(None);
+        };
+        let is_dir = entry.kind == TreeEntryKind::Directory;
+        let pattern = self.ignore_rules.add_path(&entry.path, is_dir)?;
+        let ignored = IgnoredEntry {
+            path: entry.path,
+            kind: entry.kind,
+            pattern,
+        };
+        self.refresh()?;
+        Ok(Some(ignored))
+    }
+
     pub fn files(&self) -> Vec<PathBuf> {
         let mut files = Vec::new();
-        collect_files(&self.root, &mut files);
+        self.collect_files(&self.root, &mut files);
         files
     }
 
@@ -158,7 +186,7 @@ impl FileTree {
             .with_context(|| format!("failed to read {}", directory.display()))?
             .collect::<Result<Vec<_>, _>>()?;
 
-        entries.retain(|entry| !is_ignored(entry.path().as_path()));
+        entries.retain(|entry| !self.is_hidden(entry.path().as_path()));
         entries.sort_by(|left, right| {
             let left_path = left.path();
             let right_path = right.path();
@@ -193,28 +221,32 @@ impl FileTree {
 
         Ok(())
     }
-}
 
-fn collect_files(directory: &Path, files: &mut Vec<PathBuf>) {
-    let Ok(entries) = fs::read_dir(directory) else {
-        return;
-    };
+    fn collect_files(&self, directory: &Path, files: &mut Vec<PathBuf>) {
+        let Ok(entries) = fs::read_dir(directory) else {
+            return;
+        };
 
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if is_ignored(&path) {
-            continue;
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if self.is_hidden(&path) {
+                continue;
+            }
+
+            if path.is_dir() {
+                self.collect_files(&path, files);
+            } else if path.is_file() {
+                files.push(path);
+            }
         }
+    }
 
-        if path.is_dir() {
-            collect_files(&path, files);
-        } else if path.is_file() {
-            files.push(path);
-        }
+    fn is_hidden(&self, path: &Path) -> bool {
+        is_builtin_ignored(path) || self.ignore_rules.is_ignored(path, path.is_dir())
     }
 }
 
-fn is_ignored(path: &Path) -> bool {
+fn is_builtin_ignored(path: &Path) -> bool {
     matches!(
         path.file_name().and_then(OsStr::to_str),
         Some(".git" | ".debth" | "target")
@@ -247,6 +279,57 @@ mod tests {
         tree.toggle_selected()?;
         assert_eq!(tree.visible().len(), 1);
         assert!(!tree.visible()[0].expanded);
+
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn ignored_selected_file_disappears_from_visible_tree() -> Result<()> {
+        let root = unique_temp_dir();
+        fs::create_dir_all(&root)?;
+        fs::write(root.join("keep.rs"), "fn keep() {}\n")?;
+        fs::write(root.join("skip.rs"), "fn skip() {}\n")?;
+
+        let mut tree = FileTree::new(root.clone())?;
+        while tree
+            .selected_entry()
+            .is_some_and(|entry| entry.name != "skip.rs")
+        {
+            tree.move_down();
+        }
+        let ignored = tree.ignore_selected()?.expect("selected entry");
+
+        assert_eq!(ignored.pattern, "/skip.rs");
+        assert!(tree.visible().iter().all(|entry| entry.name != "skip.rs"));
+        assert!(tree.visible().iter().any(|entry| entry.name == "keep.rs"));
+
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn ignored_selected_directory_hides_children_from_stats_files() -> Result<()> {
+        let root = unique_temp_dir();
+        let keep = root.join("keep");
+        let skip = root.join("skip");
+        fs::create_dir_all(&keep)?;
+        fs::create_dir_all(&skip)?;
+        fs::write(keep.join("main.rs"), "fn keep() {}\n")?;
+        fs::write(skip.join("main.rs"), "fn skip() {}\n")?;
+
+        let mut tree = FileTree::new(root.clone())?;
+        while tree
+            .selected_entry()
+            .is_some_and(|entry| entry.name != "skip")
+        {
+            tree.move_down();
+        }
+        let ignored = tree.ignore_selected()?.expect("selected entry");
+
+        assert_eq!(ignored.pattern, "/skip/");
+        assert!(tree.files().iter().all(|path| !path.starts_with(&skip)));
+        assert!(tree.files().iter().any(|path| path.starts_with(&keep)));
 
         fs::remove_dir_all(root)?;
         Ok(())
