@@ -62,7 +62,9 @@ struct StoreConfig {
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct PersistedFileReview {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    line_hashes: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     lines: Vec<String>,
     #[serde(default)]
     state_codes: String,
@@ -76,6 +78,14 @@ impl PersistedFileReview {
             decode_state_codes(&self.state_codes)
         } else {
             self.states.clone()
+        }
+    }
+
+    fn line_hashes(&self) -> Vec<String> {
+        if !self.line_hashes.is_empty() {
+            self.line_hashes.clone()
+        } else {
+            hash_lines(&self.lines)
         }
     }
 }
@@ -115,8 +125,13 @@ impl ReviewStore {
         let relative = self.relative_path(path)?;
         let content = read_text_lossy(path)?;
         let current_lines = split_lines(&content);
+        let current_hashes = hash_lines(&current_lines);
         let persisted = self.load_persisted(&relative)?;
-        let states = reconcile_states(&persisted.lines, &persisted.states(), &current_lines);
+        let states = reconcile_states(
+            &persisted.line_hashes(),
+            &persisted.states(),
+            &current_hashes,
+        );
         let review = FileReview {
             lines: current_lines,
             states,
@@ -210,7 +225,8 @@ impl ReviewStore {
     fn save_relative(&self, relative: &Path) -> Result<()> {
         if let Some(review) = self.cache.get(relative) {
             let persisted = PersistedFileReview {
-                lines: review.lines.clone(),
+                line_hashes: hash_lines(&review.lines),
+                lines: Vec::new(),
                 state_codes: encode_state_codes(&review.states),
                 states: Vec::new(),
             };
@@ -267,18 +283,18 @@ fn split_lines(content: &str) -> Vec<String> {
 }
 
 fn reconcile_states(
-    previous_lines: &[String],
+    previous_hashes: &[String],
     previous_states: &[LineState],
-    current_lines: &[String],
+    current_hashes: &[String],
 ) -> Vec<LineState> {
-    if previous_lines.is_empty() {
-        return vec![LineState::Unreviewed; current_lines.len()];
+    if previous_hashes.is_empty() {
+        return vec![LineState::Unreviewed; current_hashes.len()];
     }
 
-    let old = previous_lines.join("\n");
-    let new = current_lines.join("\n");
+    let old = previous_hashes.join("\n");
+    let new = current_hashes.join("\n");
     let diff = TextDiff::from_lines(&old, &new);
-    let mut states = Vec::with_capacity(current_lines.len());
+    let mut states = Vec::with_capacity(current_hashes.len());
     let mut old_index = 0;
 
     for change in diff.iter_all_changes() {
@@ -297,10 +313,10 @@ fn reconcile_states(
         }
     }
 
-    if states.len() < current_lines.len() {
-        states.resize(current_lines.len(), LineState::Unreviewed);
+    if states.len() < current_hashes.len() {
+        states.resize(current_hashes.len(), LineState::Unreviewed);
     }
-    states.truncate(current_lines.len());
+    states.truncate(current_hashes.len());
     states
 }
 
@@ -325,6 +341,17 @@ fn encode_state_codes(states: &[LineState]) -> String {
 
 fn decode_state_codes(codes: &str) -> Vec<LineState> {
     codes.chars().map(LineState::from_code).collect()
+}
+
+fn hash_lines(lines: &[String]) -> Vec<String> {
+    lines.iter().map(|line| hash_line(line)).collect()
+}
+
+fn hash_line(line: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(line.as_bytes());
+    let digest = hasher.finalize();
+    hex::encode(&digest[..8])
 }
 
 impl LineState {
@@ -385,7 +412,11 @@ mod tests {
             "}".into(),
         ];
 
-        let states = reconcile_states(&previous, &previous_states, &current);
+        let states = reconcile_states(
+            &hash_lines(&previous),
+            &previous_states,
+            &hash_lines(&current),
+        );
 
         assert_eq!(
             states,
@@ -404,7 +435,11 @@ mod tests {
         let current = vec!["let x = 2;".into()];
 
         assert_eq!(
-            reconcile_states(&previous, &previous_states, &current),
+            reconcile_states(
+                &hash_lines(&previous),
+                &previous_states,
+                &hash_lines(&current)
+            ),
             vec![LineState::Unreviewed]
         );
     }
@@ -424,6 +459,7 @@ mod tests {
     #[test]
     fn persisted_review_supports_legacy_state_array() {
         let persisted = PersistedFileReview {
+            line_hashes: Vec::new(),
             lines: Vec::new(),
             state_codes: String::new(),
             states: vec![LineState::Accepted, LineState::Rejected],
@@ -438,6 +474,7 @@ mod tests {
     #[test]
     fn persisted_review_prefers_compact_state_codes() {
         let persisted = PersistedFileReview {
+            line_hashes: Vec::new(),
             lines: Vec::new(),
             state_codes: "ra".to_string(),
             states: vec![LineState::Accepted, LineState::Accepted],
@@ -447,6 +484,37 @@ mod tests {
             persisted.states(),
             vec![LineState::Rejected, LineState::Accepted]
         );
+    }
+
+    #[test]
+    fn persisted_review_prefers_line_hashes_over_legacy_lines() {
+        let persisted = PersistedFileReview {
+            line_hashes: vec![hash_line("hash wins")],
+            lines: vec!["legacy line".to_string()],
+            state_codes: String::new(),
+            states: Vec::new(),
+        };
+
+        assert_eq!(persisted.line_hashes(), vec![hash_line("hash wins")]);
+    }
+
+    #[test]
+    fn persisted_review_hashes_legacy_lines_when_needed() {
+        let persisted = PersistedFileReview {
+            line_hashes: Vec::new(),
+            lines: vec!["legacy line".to_string()],
+            state_codes: String::new(),
+            states: Vec::new(),
+        };
+
+        assert_eq!(persisted.line_hashes(), vec![hash_line("legacy line")]);
+    }
+
+    #[test]
+    fn line_hashes_are_short_stable_fingerprints() {
+        assert_eq!(hash_line("same"), hash_line("same"));
+        assert_ne!(hash_line("same"), hash_line("different"));
+        assert_eq!(hash_line("same").len(), 16);
     }
 
     #[test]
