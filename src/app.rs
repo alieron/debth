@@ -549,7 +549,7 @@ impl App {
         self.viewer_height = inner.height as usize;
         frame.render_widget(block, area);
 
-        let Some(review) = &self.current_review else {
+        if self.current_review.is_none() {
             let empty = Paragraph::new("Select a file from the explorer and press Enter.")
                 .alignment(Alignment::Center)
                 .wrap(Wrap { trim: true });
@@ -557,7 +557,11 @@ impl App {
             return;
         };
 
-        if review.lines.is_empty() {
+        if self
+            .current_review
+            .as_ref()
+            .is_some_and(|review| review.lines.is_empty())
+        {
             frame.render_widget(
                 Paragraph::new("Empty file").alignment(Alignment::Center),
                 inner,
@@ -566,58 +570,23 @@ impl App {
         }
 
         let height = inner.height as usize;
-        let start = self.scroll as usize;
-        let end = (start + height).min(review.lines.len());
         let width = inner.width as usize;
-        let number_width = review.lines.len().to_string().len().max(3);
+        let start = {
+            let review = self.current_review.as_ref().expect("review exists");
+            viewer_scroll_start_for_cursor(
+                review,
+                self.scroll as usize,
+                self.current_line,
+                height,
+                width,
+            )
+        };
+        self.scroll = start.min(u16::MAX as usize) as u16;
 
-        let lines: Vec<Line> = review.lines[start..end]
-            .iter()
-            .enumerate()
-            .map(|(offset, text)| {
-                let line_index = start + offset;
-                let is_cursor = line_index == self.current_line;
-                let state = review
-                    .states
-                    .get(line_index)
-                    .copied()
-                    .unwrap_or(LineState::Unreviewed);
-                let state_style = if is_cursor {
-                    Style::default()
-                        .fg(Color::White)
-                        .bg(Color::Blue)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    line_style(state)
-                };
-                let line_number_style = if is_cursor {
-                    state_style
-                } else {
-                    Style::default().fg(Color::DarkGray)
-                };
-                let line_number = format!("{:>number_width$} ", line_index + 1);
-                let cursor_marker = if is_cursor { "> " } else { "  " };
-                let available = width.saturating_sub(number_width + 4);
-                let mut visible_text = text.replace('\t', "    ");
-                if visible_text.chars().count() > available {
-                    visible_text = visible_text
-                        .chars()
-                        .take(available.saturating_sub(1))
-                        .collect();
-                    visible_text.push_str("...");
-                }
-
-                Line::from(vec![
-                    Span::styled(cursor_marker, line_number_style),
-                    Span::styled(line_number, line_number_style),
-                    Span::styled(
-                        review_marker(state),
-                        state_style.add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(visible_text, state_style),
-                ])
-            })
-            .collect();
+        let lines = {
+            let review = self.current_review.as_ref().expect("review exists");
+            viewer_lines(review, start, height, width, self.current_line)
+        };
 
         frame.render_widget(Paragraph::new(lines), inner);
     }
@@ -983,6 +952,146 @@ fn tree_indicator_style(color: Color, row_style: Style, is_selected: bool) -> St
     } else {
         Style::default().fg(color).add_modifier(Modifier::BOLD)
     }
+}
+
+fn viewer_scroll_start_for_cursor(
+    review: &FileReview,
+    start: usize,
+    current_line: usize,
+    height: usize,
+    width: usize,
+) -> usize {
+    if review.lines.is_empty() {
+        return 0;
+    }
+
+    let current_line = current_line.min(review.lines.len() - 1);
+    let mut start = start.min(current_line);
+    while start < current_line
+        && viewer_visual_rows(review, start, current_line, width) >= height.max(1)
+    {
+        start += 1;
+    }
+    start
+}
+
+fn viewer_visual_rows(review: &FileReview, start: usize, end: usize, width: usize) -> usize {
+    let number_width = review.lines.len().to_string().len().max(3);
+    let end = end.min(review.lines.len());
+    let start = start.min(end);
+    review.lines[start..end]
+        .iter()
+        .map(|line| viewer_line_visual_height(line, width, number_width))
+        .sum()
+}
+
+fn viewer_line_visual_height(text: &str, width: usize, number_width: usize) -> usize {
+    wrap_code_text(text, viewer_code_width(width, number_width))
+        .len()
+        .max(1)
+}
+
+fn viewer_lines(
+    review: &FileReview,
+    start: usize,
+    height: usize,
+    width: usize,
+    current_line: usize,
+) -> Vec<Line<'static>> {
+    let number_width = review.lines.len().to_string().len().max(3);
+    let code_width = viewer_code_width(width, number_width);
+    let mut lines = Vec::new();
+
+    for line_index in start..review.lines.len() {
+        if lines.len() >= height {
+            break;
+        }
+
+        let is_cursor = line_index == current_line;
+        let state = review
+            .states
+            .get(line_index)
+            .copied()
+            .unwrap_or(LineState::Unreviewed);
+        let state_style = if is_cursor {
+            Style::default()
+                .fg(Color::White)
+                .bg(Color::Blue)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            line_style(state)
+        };
+        let line_number_style = if is_cursor {
+            state_style
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+        let line_number = format!("{:>number_width$} ", line_index + 1);
+        let cursor_marker = if is_cursor { "> " } else { "  " };
+        let chunks = wrap_code_text(&review.lines[line_index], code_width);
+        let continuation_prefix = " ".repeat(viewer_prefix_width(number_width));
+
+        for (chunk_index, chunk) in chunks.into_iter().enumerate() {
+            if lines.len() >= height {
+                break;
+            }
+
+            if chunk_index == 0 {
+                lines.push(Line::from(vec![
+                    Span::styled(cursor_marker, line_number_style),
+                    Span::styled(line_number.clone(), line_number_style),
+                    Span::styled(
+                        review_marker(state),
+                        state_style.add_modifier(Modifier::BOLD),
+                    ),
+                    Span::styled(chunk, state_style),
+                ]));
+            } else {
+                lines.push(Line::from(vec![
+                    Span::styled(continuation_prefix.clone(), line_number_style),
+                    Span::styled(chunk, state_style),
+                ]));
+            }
+        }
+    }
+
+    lines
+}
+
+fn viewer_code_width(width: usize, number_width: usize) -> usize {
+    width
+        .saturating_sub(viewer_prefix_width(number_width))
+        .max(1)
+}
+
+fn viewer_prefix_width(number_width: usize) -> usize {
+    text_width("  ") + number_width + 1 + text_width(review_marker(LineState::Unreviewed))
+}
+
+fn wrap_code_text(text: &str, width: usize) -> Vec<String> {
+    let text = text.replace('\t', "    ");
+    if text.is_empty() {
+        return vec![String::new()];
+    }
+
+    let mut chunks = Vec::new();
+    let mut current = String::new();
+    let mut current_width = 0;
+
+    for character in text.chars() {
+        let character_width = text_width(&character.to_string()).max(1);
+        if current_width > 0 && current_width + character_width > width {
+            chunks.push(current);
+            current = String::new();
+            current_width = 0;
+        }
+
+        current.push(character);
+        current_width += character_width;
+    }
+
+    chunks.push(current);
+    chunks
 }
 
 fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
@@ -1380,6 +1489,35 @@ mod tests {
         assert!(tree_entry_shows_indicators(&TreeEntryKind::File, false));
     }
 
+    #[test]
+    fn viewer_lines_wrap_long_code_lines_with_continuation_indent() {
+        let review = FileReview {
+            lines: vec!["let very_long_name = 1;".to_string()],
+            states: vec![LineState::Unreviewed],
+        };
+
+        let lines = viewer_lines(&review, 0, 4, 14, 0);
+        let rendered = lines.iter().map(line_text).collect::<Vec<_>>();
+
+        assert!(rendered.len() > 1);
+        assert_eq!(rendered[0], ">   1 ? let ve");
+        assert!(rendered[1].starts_with("        "));
+        assert!(rendered.iter().all(|line| text_width(line) <= 14));
+    }
+
+    #[test]
+    fn viewer_scroll_start_accounts_for_wrapped_rows() {
+        let review = FileReview {
+            lines: vec![
+                "let very_long_name = 1;".to_string(),
+                "let next = 2;".to_string(),
+            ],
+            states: vec![LineState::Unreviewed, LineState::Unreviewed],
+        };
+
+        assert_eq!(viewer_scroll_start_for_cursor(&review, 0, 1, 2, 14), 1);
+    }
+
     fn assert_file_state(store: &mut ReviewStore, path: &Path, expected: LineState) -> Result<()> {
         let review = store.load_file(path)?;
         assert!(review.states.iter().all(|state| *state == expected));
@@ -1391,6 +1529,10 @@ mod tests {
             .iter()
             .map(|span| span.content.as_ref())
             .collect::<String>()
+    }
+
+    fn line_text(line: &Line<'static>) -> String {
+        span_text(&line.spans)
     }
 
     fn marker_start(text: &str, marker: &str) -> usize {
