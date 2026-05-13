@@ -431,7 +431,7 @@ impl App {
             Line::from(format!("Understood: {}", self.stats.accepted)),
             Line::from(Span::styled(
                 format!("Rejected: {}", self.stats.rejected),
-                Style::default().fg(Color::Rgb(255, 165, 0)),
+                Style::default().fg(Color::Yellow),
             )),
             Line::from(format!("Unreviewed: {}", self.stats.unreviewed)),
             Line::from(format!("Total: {reviewed}/{}", self.stats.total)),
@@ -466,14 +466,11 @@ impl App {
                     TreeEntryKind::Directory => "> ",
                     TreeEntryKind::File => "  ",
                 };
-                let style = match entry.kind {
-                    TreeEntryKind::Directory => Style::default().fg(Color::Cyan),
-                    TreeEntryKind::File => Style::default(),
-                };
+                let style = Style::default();
                 let row_style = if is_selected && self.active_pane == Pane::Files {
                     Style::default()
-                        .bg(Color::Yellow)
-                        .fg(Color::Black)
+                        .bg(Color::Blue)
+                        .fg(Color::White)
                         .add_modifier(Modifier::BOLD)
                 } else if is_selected {
                     Style::default()
@@ -555,9 +552,9 @@ impl App {
                     .unwrap_or(LineState::Unreviewed);
                 let state_style = if is_cursor {
                     Style::default()
-                        .fg(Color::Black)
-                        .bg(Color::Yellow)
-                        .add_modifier(Modifier::BOLD | Modifier::REVERSED)
+                        .fg(Color::White)
+                        .bg(Color::Blue)
+                        .add_modifier(Modifier::BOLD)
                 } else {
                     line_style(state)
                 };
@@ -703,7 +700,7 @@ fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
 fn pane_border(focused: bool) -> Style {
     if focused {
         Style::default()
-            .fg(Color::Yellow)
+            .fg(Color::Blue)
             .add_modifier(Modifier::BOLD)
     } else {
         Style::default()
@@ -809,7 +806,7 @@ fn line_style(state: LineState) -> Style {
     match state {
         LineState::Unreviewed => Style::default().fg(Color::Gray),
         LineState::Accepted => Style::default().fg(Color::Green),
-        LineState::Rejected => Style::default().fg(Color::Rgb(255, 165, 0)),
+        LineState::Rejected => Style::default().fg(Color::Yellow),
     }
 }
 
