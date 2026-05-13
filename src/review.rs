@@ -171,21 +171,6 @@ impl ReviewStore {
         Ok(stats_for_states(&review.states))
     }
 
-    pub fn workspace_stats<I>(&mut self, files: I) -> Result<ReviewStats>
-    where
-        I: IntoIterator<Item = PathBuf>,
-    {
-        let mut stats = ReviewStats::default();
-        for path in files {
-            let file_stats = self.file_stats(&path)?;
-            stats.total += file_stats.total;
-            stats.accepted += file_stats.accepted;
-            stats.rejected += file_stats.rejected;
-            stats.unreviewed += file_stats.unreviewed;
-        }
-        Ok(stats)
-    }
-
     fn is_git_repo(&self) -> bool {
         self.root.join(".git").exists()
     }
